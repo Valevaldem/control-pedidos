@@ -420,7 +420,7 @@ function NuevaSemana({ asesoras, semanas, saveSemanas, draftWeek, setDraftWeek, 
   const [arrastreSeleccion, setArrastreSeleccion] = useState({});
 
   const semanaAnterior = semanas.find(s => s.activa) || semanas[semanas.length - 1];
-  const pedidosArrastrables = semanaAnterior?.pedidos?.filter(p => p.respondio === 'no' && (p.intento || 1) < 2) || [];
+  const pedidosArrastrables = semanaAnterior?.pedidos?.filter(p => p.respondio !== 'si' && (p.intento || 1) < 2) || [];
 
   const crearSemana = () => {
     const nombre = nombreSemana.trim();

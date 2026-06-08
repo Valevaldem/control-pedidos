@@ -1058,7 +1058,7 @@ function AsesoraView({ selectedAsesora, setSelectedAsesora, setView, semanaActiv
       });
       setRespuestas(init);
     }
-  }, [selectedAsesora, semanaActiva]);
+  }, [selectedAsesora]);
 
   if (!semanaActiva) {
     return (

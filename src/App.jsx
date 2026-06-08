@@ -78,6 +78,43 @@ export default function App() {
     }
   };
 
+  const guardarRespuestasAsesora = async (semanaId, asesoraNombre, respuestasObj, marcarComoEntregado = false) => {
+    try {
+      const { data: latest, error } = await supabase
+        .from('semanas')
+        .select('*')
+        .eq('id', semanaId)
+        .single();
+      if (error) throw error;
+
+      const mergedPedidos = (latest.pedidos || []).map(p => {
+        if (p.asesora === asesoraNombre && respuestasObj[p.id]) {
+          return { ...p, ...respuestasObj[p.id] };
+        }
+        return p;
+      });
+
+      let mergedEntregas = latest.entregas || [];
+      if (marcarComoEntregado) {
+        mergedEntregas = [
+          ...mergedEntregas.filter(e => e.asesora !== asesoraNombre),
+          { asesora: asesoraNombre, fecha: new Date().toISOString() }
+        ];
+      }
+
+      const updated = { ...latest, pedidos: mergedPedidos, entregas: mergedEntregas };
+      await supabase.from('semanas').upsert(updated);
+
+      setSemanas(prev => prev.map(s => s.id === semanaId ? updated : s));
+      setSemanaActiva(prev => (prev && prev.id === semanaId) ? updated : prev);
+
+      return true;
+    } catch (e) {
+      console.error('Error guardando:', e);
+      return false;
+    }
+  };
+
   const eliminarSemana = async (semanaId) => {
     try {
       await supabase.from('semanas').delete().eq('id', semanaId);
@@ -139,6 +176,7 @@ export default function App() {
           saveSemanas={saveSemanas}
           showToast={showToast}
           loadData={loadData}
+          guardarRespuestasAsesora={guardarRespuestasAsesora}
         />
       )}
     </div>
@@ -780,7 +818,6 @@ function Seguimiento({ semanaActiva, asesoras, semanas, saveSemanas, showToast }
   );
 }
 
-// ========== GESTIONAR SEMANAS (NUEVO) ==========
 function GestionarSemanas({ semanas, saveSemanas, eliminarSemana, editingSemanaId, setEditingSemanaId, asesoras, showToast }) {
   const [confirmDelete, setConfirmDelete] = useState(null);
 
@@ -1043,22 +1080,50 @@ function EditarSemana({ semana, semanas, saveSemanas, asesoras, showToast, onClo
   );
 }
 
-function AsesoraView({ selectedAsesora, setSelectedAsesora, setView, semanaActiva, semanas, saveSemanas, showToast, loadData }) {
+function AsesoraView({ selectedAsesora, setSelectedAsesora, setView, semanaActiva, semanas, saveSemanas, showToast, loadData, guardarRespuestasAsesora }) {
   const [respuestas, setRespuestas] = useState({});
+  const [respuestasIniciales, setRespuestasIniciales] = useState({});
+  const [guardando, setGuardando] = useState(false);
 
   useEffect(() => {
     if (selectedAsesora && semanaActiva) {
       const misPedidos = semanaActiva.pedidos.filter(p => p.asesora === selectedAsesora);
-      const init = {};
+      const fromServer = {};
       misPedidos.forEach(p => {
-        init[p.id] = {
-          mensajeEnviado: p.mensajeEnviado, respondio: p.respondio,
-          queContesto: p.queContesto || '', referencias: p.referencias || '',
+        fromServer[p.id] = {
+          mensajeEnviado: p.mensajeEnviado,
+          respondio: p.respondio,
+          queContesto: p.queContesto || '',
+          referencias: p.referencias || '',
         };
       });
-      setRespuestas(init);
+
+      setRespuestasIniciales(JSON.parse(JSON.stringify(fromServer)));
+
+      let current = fromServer;
+      try {
+        const borradorKey = `borrador_${semanaActiva.id}_${selectedAsesora}`;
+        const borrador = localStorage.getItem(borradorKey);
+        if (borrador) {
+          const parsed = JSON.parse(borrador);
+          current = { ...fromServer };
+          Object.keys(parsed).forEach(pid => {
+            if (current[pid]) current[pid] = { ...current[pid], ...parsed[pid] };
+          });
+        }
+      } catch (e) {}
+
+      setRespuestas(current);
     }
   }, [selectedAsesora]);
+
+  useEffect(() => {
+    if (selectedAsesora && semanaActiva && Object.keys(respuestas).length > 0) {
+      try {
+        localStorage.setItem(`borrador_${semanaActiva.id}_${selectedAsesora}`, JSON.stringify(respuestas));
+      } catch (e) {}
+    }
+  }, [respuestas, selectedAsesora, semanaActiva?.id]);
 
   if (!semanaActiva) {
     return (
@@ -1100,9 +1165,23 @@ function AsesoraView({ selectedAsesora, setSelectedAsesora, setView, semanaActiv
 
   const misPedidos = semanaActiva.pedidos.filter(p => p.asesora === selectedAsesora);
   const yaEntregue = (semanaActiva.entregas || []).some(e => e.asesora === selectedAsesora);
+  const hayCambiosSinGuardar = JSON.stringify(respuestas) !== JSON.stringify(respuestasIniciales);
 
   const updateResp = (pedidoId, field, value) => {
     setRespuestas({ ...respuestas, [pedidoId]: { ...respuestas[pedidoId], [field]: value } });
+  };
+
+  const guardarBorrador = async () => {
+    setGuardando(true);
+    const ok = await guardarRespuestasAsesora(semanaActiva.id, selectedAsesora, respuestas, false);
+    setGuardando(false);
+    if (ok) {
+      setRespuestasIniciales(JSON.parse(JSON.stringify(respuestas)));
+      try { localStorage.removeItem(`borrador_${semanaActiva.id}_${selectedAsesora}`); } catch (e) {}
+      showToast('Borrador guardado');
+    } else {
+      showToast('Error al guardar', 'error');
+    }
   };
 
   const entregar = async () => {
@@ -1110,33 +1189,36 @@ function AsesoraView({ selectedAsesora, setSelectedAsesora, setView, semanaActiv
     if (sinLlenar.length > 0) {
       if (!confirm(`Te faltan ${sinLlenar.length} pedidos por marcar. ¿Quieres entregar de todas formas?`)) return;
     }
-    const semanaActualizada = {
-      ...semanaActiva,
-      pedidos: semanaActiva.pedidos.map(p => {
-        if (p.asesora === selectedAsesora && respuestas[p.id]) return { ...p, ...respuestas[p.id] };
-        return p;
-      }),
-      entregas: [
-        ...(semanaActiva.entregas || []).filter(e => e.asesora !== selectedAsesora),
-        { asesora: selectedAsesora, fecha: new Date().toISOString() }
-      ],
-    };
-    await saveSemanas(semanas.map(s => s.id === semanaActiva.id ? semanaActualizada : s), semanaActualizada);
-    showToast('¡Seguimiento entregado!');
-    setTimeout(() => { setSelectedAsesora(null); setView('home'); }, 1000);
+    setGuardando(true);
+    const ok = await guardarRespuestasAsesora(semanaActiva.id, selectedAsesora, respuestas, true);
+    setGuardando(false);
+    if (ok) {
+      try { localStorage.removeItem(`borrador_${semanaActiva.id}_${selectedAsesora}`); } catch (e) {}
+      showToast('¡Seguimiento entregado!');
+      setTimeout(() => { setSelectedAsesora(null); setView('home'); }, 1000);
+    } else {
+      showToast('Error al entregar', 'error');
+    }
   };
 
   return (
-    <div className="max-w-3xl mx-auto p-6">
+    <div className="max-w-3xl mx-auto p-6 pb-32">
       <button onClick={() => setSelectedAsesora(null)} className="flex items-center gap-2 text-stone-500 hover:text-stone-800 text-sm mb-6"><ArrowLeft className="w-4 h-4" /> Cambiar asesora</button>
 
       <div className="mb-6">
         <div className="text-xs text-stone-500 uppercase tracking-wide mb-1">{semanaActiva.nombre}</div>
         <h2 className="text-2xl font-semibold">Hola, {selectedAsesora}</h2>
         <p className="text-stone-500 text-sm mt-1">Tienes {misPedidos.length} pedidos foráneos para seguimiento</p>
+
         {yaEntregue && (
           <div className="mt-3 inline-flex items-center gap-2 px-3 py-1.5 bg-emerald-50 text-emerald-700 text-sm rounded-lg">
-            <Check className="w-4 h-4" /> Ya entregaste tu seguimiento esta semana (puedes editarlo y volver a entregar)
+            <Check className="w-4 h-4" /> Ya entregaste tu seguimiento (puedes editarlo y volver a entregar)
+          </div>
+        )}
+
+        {!yaEntregue && hayCambiosSinGuardar && (
+          <div className="mt-3 inline-flex items-center gap-2 px-3 py-1.5 bg-amber-50 text-amber-700 text-sm rounded-lg">
+            <AlertCircle className="w-4 h-4" /> Tienes cambios sin guardar
           </div>
         )}
       </div>
@@ -1194,9 +1276,24 @@ function AsesoraView({ selectedAsesora, setSelectedAsesora, setView, semanaActiv
         })}
       </div>
 
-      <button onClick={entregar} className="w-full bg-stone-800 text-white py-3.5 rounded-xl font-medium hover:bg-stone-900 flex items-center justify-center gap-2">
-        <Check className="w-5 h-5" /> Entregar seguimiento
-      </button>
+      <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-stone-200 p-4 z-10">
+        <div className="max-w-3xl mx-auto flex gap-2">
+          <button
+            onClick={guardarBorrador}
+            disabled={guardando || !hayCambiosSinGuardar}
+            className="flex-1 bg-white border-2 border-stone-800 text-stone-800 py-3 rounded-xl font-medium hover:bg-stone-50 flex items-center justify-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {guardando ? 'Guardando...' : 'Guardar borrador'}
+          </button>
+          <button
+            onClick={entregar}
+            disabled={guardando}
+            className="flex-1 bg-stone-800 text-white py-3 rounded-xl font-medium hover:bg-stone-900 flex items-center justify-center gap-2 disabled:opacity-50"
+          >
+            <Check className="w-5 h-5" /> Entregar
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
